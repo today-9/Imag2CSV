@@ -1,0 +1,11 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# ローカル設定・作業ファイル
+.claude/
+graph_data.csv
