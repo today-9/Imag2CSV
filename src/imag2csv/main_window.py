@@ -47,6 +47,7 @@ from . import detection
 from .capture import CaptureController
 from .model import Calibration, Series
 from .preview import PreviewDialog
+from .theme import icon as themed_icon
 from .qimage_util import qimage_to_rgb, rgba_to_qimage
 from .view import (
     MODE_BRUSH,
@@ -129,19 +130,23 @@ class MainWindow(QMainWindow):
         self.view.pointAddRequested.connect(self._on_point_add)
         self.view.scenePosChanged.connect(self._on_scene_pos)
         self.view.roiChanged.connect(self._schedule_preview)
+        self.view.pointsChanged.connect(self._update_step_states)
 
         self._add_series()  # 最初の系列を用意
+        self._update_step_states()
 
     # ================= ツールバー =================
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("メイン", self)
         tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.addToolBar(Qt.TopToolBarArea, tb)
 
-        def act(text, slot, shortcut=None, checkable=False, tip=None):
+        def act(text, slot, shortcut=None, checkable=False, tip=None, ico=None):
             a = QAction(text, self)
+            if ico:
+                a.setIcon(themed_icon(ico))
             if shortcut:
                 a.setShortcut(QKeySequence(shortcut))
             a.setCheckable(checkable)
@@ -154,24 +159,25 @@ class MainWindow(QMainWindow):
             tb.addAction(a)
             return a
 
-        act("開く", self._open_image, "Ctrl+O")
-        act("貼り付け", self._paste_clipboard, "Ctrl+V")
-        act("キャプチャ", self._start_capture, "F9")
+        act("開く", self._open_image, "Ctrl+O", ico="fa5s.folder-open")
+        act("貼り付け", self._paste_clipboard, "Ctrl+V", ico="fa5s.paste")
+        act("キャプチャ", self._start_capture, "F9", ico="fa5s.camera")
         tb.addSeparator()
 
         self._mode_actions: dict[str, QAction] = {}
         group = QActionGroup(self)
         group.setExclusive(True)
-        for i, (mode, text) in enumerate(
+        for i, (mode, text, ico) in enumerate(
             [
-                (MODE_PAN, "パン"),
-                (MODE_BRUSH, "ブラシ"),
-                (MODE_ERASE, "消しゴム"),
-                (MODE_EDIT, "点編集"),
+                (MODE_PAN, "パン", "fa5s.hand-paper"),
+                (MODE_BRUSH, "ブラシ", "fa5s.paint-brush"),
+                (MODE_ERASE, "消しゴム", "fa5s.eraser"),
+                (MODE_EDIT, "点編集", "fa5s.mouse-pointer"),
             ],
             start=1,
         ):
             a = QAction(text, self)
+            a.setIcon(themed_icon(ico))
             a.setCheckable(True)
             a.setShortcut(QKeySequence(str(i)))
             a.setToolTip(f"{text}モード (キー: {i})")
@@ -182,14 +188,17 @@ class MainWindow(QMainWindow):
         self._mode_actions[MODE_PAN].setChecked(True)
         tb.addSeparator()
 
-        act("検出実行", self._detect, "F5")
-        act("プレビュー", self._show_preview, "Ctrl+P", tip="抽出データの数値とグラフを確認")
-        act("CSV出力", self._export_csv, "Ctrl+E")
+        act("検出実行", self._detect, "F5", ico="fa5s.play")
+        act(
+            "プレビュー", self._show_preview, "Ctrl+P",
+            tip="抽出データの数値とグラフを確認", ico="fa5s.table",
+        )
+        act("CSV出力", self._export_csv, "Ctrl+E", ico="fa5s.file-csv")
         tb.addSeparator()
-        act("全体表示", self.view.fit_view, "Ctrl+0")
+        act("全体表示", self.view.fit_view, "Ctrl+0", ico="fa5s.expand")
         loupe = act(
             "ルーペ", self.loupe_dock.setVisible, "L", checkable=True,
-            tip="ルーペパネルの表示切替",
+            tip="ルーペパネルの表示切替", ico="fa5s.search-plus",
         )
         loupe.setChecked(True)
         # ドックの×で閉じたときもボタン状態を同期
@@ -202,11 +211,18 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
 
-        # --- キャリブレーション ---
-        box = QGroupBox("軸キャリブレーション（直線軸）")
+        # --- 画像ステータス ---
+        self.image_status = QLabel("画像: 未読込（開く / キャプチャ / Ctrl+V）")
+        self.image_status.setStyleSheet("color: #9aa0aa;")
+        layout.addWidget(self.image_status)
+
+        # --- ① キャリブレーション ---
+        box = QGroupBox("① 軸キャリブレーション")
+        self._step_boxes: dict[str, QGroupBox] = {}
+        self._step_boxes["cal"] = box
         grid = QGridLayout(box)
         btn_seq = QPushButton("連続指定（X1→X2→Y1→Y2）")
-        btn_seq.setStyleSheet("font-weight: bold;")
+        btn_seq.setProperty("accent", True)
         btn_seq.setToolTip(
             "4点を続けてクリックで指定します。\n"
             "指定後にマーカー調整で微調整 → 最後に値を入力してください。"
@@ -245,13 +261,15 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.cal_status, len(CAL_KEYS) + 2, 0, 1, 2)
         layout.addWidget(box)
 
-        # --- 系列 ---
-        box = QGroupBox("系列")
+        # --- ② 系列と色 ---
+        box = QGroupBox("② 系列と色")
+        self._step_boxes["series"] = box
         v = QVBoxLayout(box)
         self.series_list = QListWidget()
         self.series_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.series_list.currentItemChanged.connect(self._on_series_changed)
         self.series_list.itemChanged.connect(lambda _: None)  # リネームはそのまま反映
+        self.series_list.setMaximumHeight(110)
         v.addWidget(self.series_list)
         h = QHBoxLayout()
         btn_add = QPushButton("追加")
@@ -261,11 +279,8 @@ class MainWindow(QMainWindow):
         h.addWidget(btn_add)
         h.addWidget(btn_del)
         v.addLayout(h)
-        layout.addWidget(box)
-
-        # --- 色検出 ---
-        box = QGroupBox("色検出")
-        form = QFormLayout(box)
+        form = QFormLayout()
+        v.addLayout(form)
         btn_pick = QPushButton("画像から色を取得 (C)")
         btn_pick.setShortcut("C")
         btn_pick.setToolTip(
@@ -296,8 +311,8 @@ class MainWindow(QMainWindow):
         form.addRow(self.preview_btn)
         layout.addWidget(box)
 
-        # --- ROI ---
-        box = QGroupBox("ROIブラシ（検出範囲の限定）")
+        # --- ③ ROI ---
+        box = QGroupBox("③ ROIブラシ（任意: 検出範囲の限定）")
         form = QFormLayout(box)
         self.brush_spin = QSpinBox()
         self.brush_spin.setRange(2, 200)
@@ -311,8 +326,9 @@ class MainWindow(QMainWindow):
         form.addRow(btn_clear)
         layout.addWidget(box)
 
-        # --- 抽出設定 ---
-        box = QGroupBox("抽出設定")
+        # --- ④ 抽出設定 ---
+        box = QGroupBox("④ 抽出設定")
+        self._step_boxes["detect"] = box
         form = QFormLayout(box)
         self.extract_combo = QComboBox()
         self.extract_combo.addItems(["線（リサンプリング）", "点（散布図・全検出）"])
@@ -367,8 +383,8 @@ class MainWindow(QMainWindow):
             "選択中の系列の点は置き換えられるので、手動調整は最後に行ってください。"
         )
         form.addRow(self.auto_detect_check)
-        btn_detect = QPushButton("検出実行")
-        btn_detect.setStyleSheet("font-weight: bold;")
+        btn_detect = QPushButton("検出実行 (F5)")
+        btn_detect.setProperty("accent", True)
         btn_detect.clicked.connect(self._detect)
         form.addRow(btn_detect)
         layout.addWidget(box)
@@ -388,7 +404,19 @@ class MainWindow(QMainWindow):
         self.partial_check.toggled.connect(self._schedule_detect)
         self.tol_slider.valueChanged.connect(self._schedule_detect)
 
-        # --- 編集ヒント / 出力 ---
+        # --- ⑤ 確認と出力 ---
+        box = QGroupBox("⑤ 確認と出力")
+        h = QHBoxLayout(box)
+        btn_preview = QPushButton("プレビュー")
+        btn_preview.clicked.connect(self._show_preview)
+        h.addWidget(btn_preview)
+        btn_export = QPushButton("CSVエクスポート")
+        btn_export.setProperty("accent", True)
+        btn_export.clicked.connect(self._export_csv)
+        h.addWidget(btn_export)
+        layout.addWidget(box)
+
+        # --- 編集ヒント ---
         hint = QLabel(
             "モード切替: 1〜4 キー / 色取得: C\n"
             "点編集モード: クリック選択 / ドラッグ移動\n"
@@ -398,13 +426,8 @@ class MainWindow(QMainWindow):
             "ホイール: ズーム / 中ドラッグ: パン\n"
             "L: ルーペ表示切替 / Ctrl+0: 全体表示"
         )
-        hint.setStyleSheet("color: gray;")
+        hint.setStyleSheet("color: #9aa0aa;")
         layout.addWidget(hint)
-
-        btn_export = QPushButton("CSVエクスポート")
-        btn_export.setStyleSheet("font-weight: bold;")
-        btn_export.clicked.connect(self._export_csv)
-        layout.addWidget(btn_export)
 
         layout.addStretch(1)
 
@@ -471,11 +494,47 @@ class MainWindow(QMainWindow):
         for key in CAL_KEYS:
             self._cal_edits[key].clear()
         self._update_cal_status()
+        self.image_status.setText(
+            f"画像: {qimg.width()} × {qimg.height()} px 読込済み ✓"
+        )
+        self._update_step_states()
         self.statusBar().showMessage(
             f"画像を読み込みました ({qimg.width()} x {qimg.height()} px)。"
             "軸キャリブレーションを設定してください",
             6000,
         )
+
+    # ================= ステップ状態 =================
+
+    _STEP_TITLES = {
+        "cal": "① 軸キャリブレーション",
+        "series": "② 系列と色",
+        "detect": "④ 抽出設定",
+    }
+
+    def _update_step_states(self, *_args) -> None:
+        """パネルの各ステップに完了✓と「次にやること」ハイライトを反映する。"""
+        series = self._current_series()
+        done = {
+            "cal": self.cal.ready(),
+            "series": series is not None and series.color is not None,
+            "detect": bool(self.view.points()),
+        }
+        order = ["cal", "series", "detect"]
+        next_key = None
+        if self.view.has_image():
+            next_key = next((k for k in order if not done[k]), None)
+        for key, box in self._step_boxes.items():
+            box.setTitle(self._STEP_TITLES[key] + (" ✓" if done[key] else ""))
+            changed = (
+                box.property("done") != done[key]
+                or box.property("next") != (key == next_key)
+            )
+            box.setProperty("done", done[key])
+            box.setProperty("next", key == next_key)
+            if changed:  # 動的プロパティのQSS再評価
+                box.style().unpolish(box)
+                box.style().polish(box)
 
     # ================= モード =================
 
@@ -598,10 +657,11 @@ class MainWindow(QMainWindow):
     def _update_cal_status(self) -> None:
         if self.cal.ready():
             self.cal_status.setText("キャリブレーション完了 ✓")
-            self.cal_status.setStyleSheet("color: #2a2;")
+            self.cal_status.setStyleSheet("color: #34d399;")
         else:
             self.cal_status.setText("未設定（4点の位置と値が必要）")
-            self.cal_status.setStyleSheet("color: gray;")
+            self.cal_status.setStyleSheet("color: #9aa0aa;")
+        self._update_step_states()
 
     # ================= 系列 =================
 
@@ -642,6 +702,7 @@ class MainWindow(QMainWindow):
         self.tol_spin.blockSignals(False)
         self._update_swatch(series)
         self._schedule_preview()
+        self._update_step_states()
 
     def _update_swatch(self, series: Series) -> None:
         if series.color is not None:
@@ -696,6 +757,7 @@ class MainWindow(QMainWindow):
         # 取得したらパンモードへ戻る
         self._set_mode(MODE_PAN)
         self._check_mode_button(MODE_PAN)
+        self._update_step_states()
         self.statusBar().showMessage(
             f"色を取得: RGB({r}, {g}, {b})", 4000
         )
@@ -845,6 +907,7 @@ class MainWindow(QMainWindow):
         for px, py in points:
             # 検出はピクセルインデックス座標 → 表示はピクセル中心 (+0.5)
             self.view.add_point(series, px + 0.5, py + 0.5)
+        self._update_step_states()
         self.statusBar().showMessage(
             f"「{self._series_name(series)}」: {len(points)} 点を検出しました", 5000
         )
