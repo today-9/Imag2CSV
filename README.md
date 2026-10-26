@@ -6,8 +6,12 @@
 
 ```powershell
 uv sync        # 初回のみ
-uv run imag2csv
+uv run python -m imag2csv
 ```
+
+> `uv run imag2csv` でも起動できますが、Windows の「スマート アプリ コントロール」が有効な環境では
+> uv が生成する未署名の `imag2csv.exe` がブロックされます（os error 4551）。
+> `python -m imag2csv` は署名済みの `python.exe` 経由で起動するため、この制限を受けません。
 
 ## 使い方
 
